@@ -36,7 +36,12 @@ function send_result(message_id, result) {
 function get_intercepted_urls(worker) {
   return new Promise(function(resolve) {
       var channel = new MessageChannel();
-      channel.port1.onmessage = function(msg) { resolve(msg.data.urls); };
+      channel.port1.onmessage = (msg) => {
+        const urls = msg.data.requestInfos.map(info => {
+          return info.url;
+        });
+        resolve(urls);
+      };
       worker.postMessage({port: channel.port2}, [channel.port2]);
     });
 }

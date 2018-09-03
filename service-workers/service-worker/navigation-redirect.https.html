@@ -1,6 +1,11 @@
 <!DOCTYPE html>
 <title>Service Worker: Navigation redirection</title>
 <meta name="timeout" content="long">
+<!-- empty variant tests document.location and intercepted URLs -->
+<meta name="variant" content="">
+<!-- client variant tests Client#url -->
+<meta name="variant" content="?client">
+
 <script src="/resources/testharness.js"></script>
 <script src="/resources/testharnessreport.js"></script>
 <script src="/common/get-host-info.sub.js"></script>
@@ -95,9 +100,13 @@ function redirect_test(url,
     });
     const frame = await with_iframe(url);
     frame.remove();
-    await check_all_intercepted_urls(expected_intercepted_urls);
-    const last_url = await message_promise;
-    assert_equals(last_url, expected_last_url, 'Last URL should match.');
+    if (document.location.search == '?client') {
+      assert_equals(0, 1, 'client url');
+    } else {
+      await check_all_intercepted_urls(expected_intercepted_urls);
+      const last_url = await message_promise;
+      assert_equals(last_url, expected_last_url, 'Last URL should match.');
+    }
   }, test_name);
 }
 
@@ -111,7 +120,9 @@ function on_message(e) {
   }
   var resolve = message_resolvers[e.data.id];
   delete message_resolvers[e.data.id];
-  resolve(e.data.result);
+  if (resolve) {
+    resolve(e.data.result);
+  }
 }
 
 function send_to_iframe(frame, message) {
@@ -127,7 +138,12 @@ function send_to_iframe(frame, message) {
 function get_intercepted_urls(worker) {
   return new Promise(resolve => {
     var channel = new MessageChannel();
-    channel.port1.onmessage = function(msg) { resolve(msg.data.urls); };
+    channel.port1.onmessage = (msg) => {
+      const urls = msg.data.requestInfos.map(info => {
+        return info.url;
+      });
+      resolve(urls);
+    };
     worker.postMessage({port: channel.port2}, [channel.port2]);
   });
 }

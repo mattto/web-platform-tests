@@ -5,20 +5,33 @@ var cacheName = 'urls-' + self.registration.scope;
 
 var waitUntilPromiseList = [];
 
-self.addEventListener('message', function(event) {
-    var urls;
-    event.waitUntil(Promise.all(waitUntilPromiseList).then(function() {
-      waitUntilPromiseList = [];
-      return caches.open(cacheName);
-    }).then(function(cache) {
-      return cache.keys();
-    }).then(function(requestList) {
-      urls = requestList.map(function(request) { return request.url; });
-      return caches.delete(cacheName);
-    }).then(function() {
-      event.data.port.postMessage({urls: urls});
-    }));
-  });
+self.addEventListener('message', async function(event) {
+  let done;
+  event.waitUntil(new Promise(resolve => {
+    done = resolve;
+  }));
+
+  // Wait for fetch events to finish.
+  await Promise.all(waitUntilPromiseList);
+  waitUntilPromiseList = [];
+
+  // Generate the message.
+  const cache = await caches.open(cacheName);
+  const requestList = await cache.keys();
+  const requestInfos = [];
+  for (let i = 0; i < requestList.length; i++) {
+    const response = await cache.match(requestList[i]);
+    const body = await response.json();
+    requestInfos[i] = {
+      url: requestList[i].url,
+      resultingClientId: body.resultingClientId
+    };
+  }
+  await caches.delete(cacheName);
+
+  event.data.port.postMessage({requestInfos});
+  done();
+});
 
 function get_query_params(url) {
   var search = (new URL(url)).search;
@@ -36,7 +49,11 @@ function get_query_params(url) {
 
 self.addEventListener('fetch', function(event) {
     var waitUntilPromise = caches.open(cacheName).then(function(cache) {
-      return cache.put(event.request, new Response());
+      const responseBody = {};
+      responseBody['resultingClientId'] = event.resultingClientId;
+      const headers = new Headers({'Content-Type': 'application/json'});
+      const response = new Response(JSON.stringify(responseBody), {headers});
+      return cache.put(event.request, response);
     });
     event.waitUntil(waitUntilPromise);
 
