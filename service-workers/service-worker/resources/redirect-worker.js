@@ -5,7 +5,7 @@ var cacheName = 'urls-' + self.registration.scope;
 
 var waitUntilPromiseList = [];
 
-self.addEventListener('message', async function(event) {
+async function getRequestInfos(event) {
   let done;
   event.waitUntil(new Promise(resolve => {
     done = resolve;
@@ -31,6 +31,34 @@ self.addEventListener('message', async function(event) {
 
   event.data.port.postMessage({requestInfos});
   done();
+}
+
+async function getClients(event) {
+  // |map| is like:
+  // {a: id1, b: id2, c: id3}
+  const map = event.data.map;
+  const result = {}
+  Object.keys(map).forEach(async key => {
+    const id = map[key];
+    const client = await self.clients.get(id);
+    if (client === undefined) {
+      result[key] = {found: false};
+      return;
+    }
+    result[key] = {found: true, url: client.url, id: client.id};
+  });
+  event.data.port.postMessage({clients: result});
+}
+
+self.addEventListener('message', async function(event) {
+  if (event.data.message == 'getRequestInfos') {
+    await getRequestInfos(event);
+    return;
+  }
+  if (event.data.message == 'getClients') {
+    await getClients(event);
+    return;
+  }
 });
 
 function get_query_params(url) {

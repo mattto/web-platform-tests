@@ -3,7 +3,7 @@
 <meta name="timeout" content="long">
 <!-- empty variant tests document.location and intercepted URLs -->
 <meta name="variant" content="">
-<!-- client variant tests Client#url -->
+<!-- client variant tests the Clients API (resultingClientId and Client.url) -->
 <meta name="variant" content="?client">
 
 <script src="/resources/testharness.js"></script>
@@ -55,7 +55,7 @@ promise_test(async t  => {
       wait_for_state(t, workers[1], 'activated'),
       // This promise will resolve when |wait_for_worker_promise|
       // in OTHER_ORIGIN_IFRAME_URL resolves.
-      send_to_iframe(other_origin_frame, 'wait_for_worker')]);
+      send_to_iframe(other_origin_frame, {command: 'wait_for_worker'})]);
 }, 'initialize global state');
 
 function get_effective_worker(registration) {
@@ -74,8 +74,57 @@ async function check_all_intercepted_urls(expected_urls) {
   // Gets the request URLs which are intercepted by OTHER_ORIGIN_SCOPE's
   // SW. This promise will resolve when get_intercepted_urls() in
   // OTHER_ORIGIN_IFRAME_URL resolves.
-  urls.push(await send_to_iframe(other_origin_frame, 'get_intercepted_urls'));
+  urls.push(await send_to_iframe(other_origin_frame, {command: 'get_intercepted_urls'}));
   assert_object_equals(urls, expected_urls, 'Intercepted URLs should match.');
+}
+
+async function get_all_request_infos()  {
+  const request_infos = [];
+  request_infos.push(await get_request_infos(workers[0]));
+  request_infos.push(await get_request_infos(workers[1]));
+  request_infos.push(await send_to_iframe(other_origin_frame, {command: 'get_request_infos'}));
+  return request_infos;
+}
+
+// Checks |clients| returned from a worker. Only the client named 'x' should
+// be found. Returns true if a client was found.
+//
+// Note that 'x' may not be found by this worker, if it's cross-origin.
+//
+// |clients| is an object like:
+// {x: {found: true, id: id1, url: url1}, b: {found: false}}
+function check_clients(clients, expected_id, expected_url, worker_name) {
+  let found = false;
+  Object.keys(clients).forEach(key => {
+    const info = clients[key];
+    if (info.found) {
+      // Only x should be found.
+      assert_equals(key, 'x', `${worker_name} client key`);
+
+      assert_equals(info.id, expected_id, `${worker_name} client id`);
+      assert_equals(info.url, expected_url, `${worker_name} client url`);
+      found = true;
+    }
+  });
+  return found;
+}
+
+function check_resulting_client_ids(infos, expected_infos, map, worker) {
+  assert_equals(infos.length, expected_infos.length,
+                `request length for ${worker}`);
+  for (var i = 0; i < infos.length; i++) {
+    const key = expected_infos[i].resultingClientId;
+    const url = expected_infos[i].url;
+    const actual_id = infos[i].resultingClientId;
+    const expected_id = map[key];
+    // assert_equals(typeof(actual_id), 'string', `resultingClientId for ${url} should be a string`);
+    if (expected_id) {
+      assert_equals(requestInfos[0], expected_id,
+                    `resultingClientId for ${url}`);
+    } else {
+      map[key] = actual_id;
+    }
+  }
 }
 
 // Creates an iframe and navigates to |url|, which is expected to start a chain
@@ -91,7 +140,7 @@ async function check_all_intercepted_urls(expected_urls) {
 //   ]
 function redirect_test(url,
                        expected_last_url,
-                       expected_intercepted_urls,
+                       expected_request_infos,
                        test_name) {
   promise_test(async t => {
     const message_promise = new Promise(resolve => {
@@ -99,12 +148,67 @@ function redirect_test(url,
         message_resolvers['last_url'] = resolve;
     });
     const frame = await with_iframe(url);
-    frame.remove();
+    t.add_cleanup(() => { frame.remove(); });
+
+    // The "client" variant tests the Clients API using resultingClientId.
     if (document.location.search == '?client') {
-      assert_equals(0, 1, 'client url');
-    } else {
+      const map = {};
+      // Request infos is an array like:
+      // [
+      //   [{url: url1, resultingClientId: id1}],
+      //   [{url: url2, resultingClientId: id1}],
+      //   [{url: url3: resultingClientId: id2}]
+      // ]
+      const requestInfos = await get_all_request_infos();
+      check_resulting_client_ids(requestInfos[0], expected_request_infos[0], map, 'worker0');
+      check_resulting_client_ids(requestInfos[1], expected_request_infos[1], map, 'worker1');
+      check_resulting_client_ids(requestInfos[2], expected_request_infos[2], map, 'crossOriginWorker');
+
+      // Now map is like:
+      // {x: id1, b: id2, c: id3}
+      // Ask each worker to try to resolve the ids to clients.
+      // Only 'x' should resolve to a client.
+      const client_infos  = await get_all_clients(map);
+
+      // Client infos is an object like:
+      // {
+      //   worker0: {x: {found: true, id: id1, url: url1}, b: {found: false}},
+      //   worker1: {x: {found: true, id: id1, url: url1}},
+      //   crossOriginWorker: {x: {found: false}, b, {found: false}]
+      // }
+      // Only 'x' should be found, id should be id1, and url should be expected_last_url.
+      // At least one 'x' should be present.
+      let found = false;
+      let expected_id = map['x'];
+      found = check_clients(client_infos.worker0,
+                            expected_id,
+                            expected_last_url,
+                            'worker0');
+      found = check_clients(client_infos.worker1,
+                            expected_id,
+                            expected_last_url,
+                            'worker1') || found;
+      found = check_clients(client_infos.crossOriginWorker,
+                            expected_id,
+                            expected_last_url,
+                            'crossOriginWorker') || found;
+      assert_true(found, 'a client should have been found');
+    }
+    // The default variant tests the request interception chain and
+    // resulting document.location.
+    else {
+      const expected_intercepted_urls = expected_request_infos.map(
+          request_list => {
+        return request_list.map(info => {
+          return info.url;
+        });
+      });
+      console.log(expected_intercepted_urls);
+      console.log('check');
       await check_all_intercepted_urls(expected_intercepted_urls);
+      console.log('last');
       const last_url = await message_promise;
+      console.log('last2');
       assert_equals(last_url, expected_last_url, 'Last URL should match.');
     }
   }, test_name);
@@ -130,8 +234,29 @@ function send_to_iframe(frame, message) {
   return new Promise(resolve => {
     message_resolvers[message_id] = resolve;
     frame.contentWindow.postMessage(
-        {id: message_id, message: message},
+        {id: message_id, message},
         host_info['HTTPS_REMOTE_ORIGIN']);
+  });
+}
+
+async function get_all_clients(map) {
+  const client_infos = {};
+  client_infos['worker0'] = await get_clients(workers[0], map);
+  client_infos['worker1'] = await get_clients(workers[1], map);
+  client_infos['crossOriginWorker'] =
+      await send_to_iframe(other_origin_frame,
+                           {command: 'get_clients', map: map});
+  return client_infos;
+}
+
+function get_clients(worker, map) {
+  return new Promise(resolve => {
+    var channel = new MessageChannel();
+    channel.port1.onmessage = (msg) => {
+      resolve(msg.data.clients);
+    };
+    worker.postMessage({message: 'getClients', map, port: channel.port2},
+                       [channel.port2]);
   });
 }
 
@@ -144,32 +269,53 @@ function get_intercepted_urls(worker) {
       });
       resolve(urls);
     };
-    worker.postMessage({port: channel.port2}, [channel.port2]);
+    worker.postMessage({message: 'getRequestInfos', port: channel.port2}, [channel.port2]);
   });
 }
 
+function get_request_infos(worker) {
+  return new Promise(resolve => {
+    var channel = new MessageChannel();
+    channel.port1.onmessage = (msg) => {
+      resolve(msg.data.requestInfos);
+    };
+    worker.postMessage({message: 'getRequestInfos', port: channel.port2}, [channel.port2]);
+  });
+}
+
+let url;
+
 // Normal redirect (from out-scope to in-scope).
+url = SCOPE1;
 redirect_test(
-    OUT_SCOPE + 'url=' + encodeURIComponent(SCOPE1),
-    SCOPE1,
-    [[SCOPE1], [], []],
+    OUT_SCOPE + 'url=' + encodeURIComponent(url),
+    url,
+    [[{url, resultingClientId: 'x'}], [], []],
     'Normal redirect to same-origin scope.');
+
+
+url = SCOPE1 + '#ref';
 redirect_test(
     OUT_SCOPE + 'url=' + encodeURIComponent(SCOPE1) + '#ref',
-    SCOPE1 + '#ref',
-    [[SCOPE1 + '#ref'], [], []],
+    url,
+    [[{url, resultingClientId: 'x'}], [], []],
     'Normal redirect to same-origin scope with a hash fragment.');
+
+url = SCOPE1 + '#ref2';
 redirect_test(
-    OUT_SCOPE + 'url=' + encodeURIComponent(SCOPE1 + '#ref2') + '#ref',
-    SCOPE1 + '#ref2',
-    [[SCOPE1 + '#ref2'], [], []],
+    OUT_SCOPE + 'url=' + encodeURIComponent(url) + '#ref',
+    url,
+    [[{url, resultingClientId: 'x'}], [], []],
     'Normal redirect to same-origin scope with different hash fragments.');
+
+url = OTHER_ORIGIN_SCOPE;
 redirect_test(
-    OUT_SCOPE + 'url=' + encodeURIComponent(OTHER_ORIGIN_SCOPE),
-    OTHER_ORIGIN_SCOPE,
-    [[], [], [OTHER_ORIGIN_SCOPE]],
+    OUT_SCOPE + 'url=' + encodeURIComponent(url),
+    url,
+    [[], [], [{url, resultingClientId: 'x'}]],
     'Normal redirect to other-origin scope.');
 
+/*
 // SW fallbacked redirect. SW doesn't handle the fetch request.
 redirect_test(
     SCOPE1 + 'url=' + encodeURIComponent(OUT_SCOPE),
@@ -427,14 +573,14 @@ redirect_test(
     SCOPE1 + 'sw=manualThroughCache&noLocationRedirect',
     [[SCOPE1 + 'sw=manualThroughCache&noLocationRedirect'], [], []],
     'No location redirect response via Cache.');
-
+*/
 // Clean up the test environment. This promise_test() needs to be the last one.
 promise_test(async t => {
   registrations.forEach(async registration => {
     if (registration)
       await registration.unregister();
   });
-  await send_to_iframe(other_origin_frame, 'unregister');
+  await send_to_iframe(other_origin_frame, {command: 'unregister'});
   other_origin_frame.remove();
 }, 'clean up global state');
 </script>
